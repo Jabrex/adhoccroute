@@ -1,0 +1,236 @@
+import os
+import paramiko
+
+########################################
+# Raspberry Pi Bilgileri
+########################################
+devices = {
+    "yasarpi1": {
+        "ip": "192.168.1.100",
+        "username": "yasarpi1",
+        "password": "yasarpi1"
+    },
+    "yasarpi2": {
+        "ip": "192.168.1.101",
+        "username": "yasarpi2",
+        "password": "yasarpi2"
+    },
+    "yasarpi3": {
+        "ip": "192.168.1.102",
+        "username": "yasarpi3",
+        "password": "yasarpi3"
+    }
+}
+
+########################################
+# SFTP ile Dosya Yükleme (lokal → uzak)
+########################################
+def scp_upload(local_file, remote_file, device_info):
+    """
+    Lokal makinedeki 'local_file' dosyasını,
+    device_info'ya ait uzak cihazdaki 'remote_file' konumuna kopyalar.
+    """
+    username = device_info["username"]
+    ip = device_info["ip"]
+    password = device_info["password"]
+
+    try:
+        # Önce lokal dosya var mı kontrol edelim
+        if not os.path.isfile(local_file):
+            print(f"[HATA] Lokal dosya bulunamadı: {local_file}")
+            return False
+
+        print(f"[INFO] Dosya Yükleme: {local_file} --> {ip}:{remote_file}")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=username, password=password)
+
+        sftp = ssh.open_sftp()
+        sftp.put(local_file, remote_file)
+        sftp.close()
+        ssh.close()
+
+        print(f"[OK] Yükleme tamamlandı: {remote_file}")
+        return True
+    except Exception as e:
+        print(f"[HATA] scp_upload hatası: {e}")
+        return False
+
+########################################
+# SFTP ile Dosya İndirme (uzak → lokal)
+########################################
+def scp_download(remote_file, local_file, device_info):
+    """
+    Uzak cihazdaki 'remote_file' dosyasını,
+    lokal makinede 'local_file' adıyla kaydeder.
+    """
+    username = device_info["username"]
+    ip = device_info["ip"]
+    password = device_info["password"]
+
+    try:
+        print(f"[INFO] Dosya İndirme: {ip}:{remote_file} --> {local_file}")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=username, password=password)
+
+        sftp = ssh.open_sftp()
+        sftp.get(remote_file, local_file)
+        sftp.close()
+        ssh.close()
+
+        print(f"[OK] İndirme tamamlandı: {local_file}")
+        return True
+    except Exception as e:
+        print(f"[HATA] scp_download hatası: {e}")
+        return False
+
+########################################
+# Uzak Cihazda Dosya Oluşturma
+########################################
+def create_remote_file(device_info, remote_path, content):
+    """
+    Uzak cihazda 'remote_path' konumunda bir dosya oluşturur
+    ve içine 'content' yazar.
+    """
+    username = device_info["username"]
+    ip = device_info["ip"]
+    password = device_info["password"]
+
+    try:
+        print(f"[INFO] Uzakta Dosya Oluştur: {ip}:{remote_path}")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=username, password=password)
+
+        command = f"echo '{content}' > {remote_path}"
+        ssh.exec_command(command)
+        ssh.close()
+
+        print(f"[OK] Dosya oluşturuldu: {remote_path}")
+        return True
+    except Exception as e:
+        print(f"[HATA] create_remote_file hatası: {e}")
+        return False
+
+########################################
+# 1 → 2 → 3 DOSYA TRANSFERİ
+########################################
+def file_transfer_1_to_2_to_3(
+    local_source,       # Pi #1 üzerinde bulunan (lokal) dosya yolu
+    remote_path_pi2,    # Pi #2'de geçici dosya yolu
+    remote_path_pi3     # Pi #3'te nihai dosya yolu
+):
+    """
+    1) Lokal (Pi #1) dosyayı 2. Pi'ye kopyalar
+    2) Ardından 2. Pi'deki dosyayı tekrar lokalinize indirir
+    3) Ve 3. Pi'ye yükler
+    """
+
+    pi2_info = devices["yasarpi2"]
+    pi3_info = devices["yasarpi3"]
+
+    # Adım 1: Lokal (Pi #1) → Pi #2
+    if not scp_upload(local_source, remote_path_pi2, pi2_info):
+        print("[HATA] 1→2 yüklemesi başarısız.")
+        return False
+
+    # Adım 2: Pi #2 → Lokal (Pi #1)  (indirip /tmp içine kaydedelim)
+    temp_local_download = "/tmp/temp_file_from_pi2"
+    if not scp_download(remote_path_pi2, temp_local_download, pi2_info):
+        print("[HATA] 2→1 indirme başarısız.")
+        return False
+
+    # Adım 3: Lokal (Pi #1) → Pi #3
+    if not scp_upload(temp_local_download, remote_path_pi3, pi3_info):
+        print("[HATA] 1→3 yüklemesi başarısız.")
+        return False
+
+    print("[OK] Dosya başarıyla 1→2→3 akışını tamamladı.")
+    return True
+
+########################################
+# 3 → 2 → 1 YANIT DOSYASI TRANSFERİ
+########################################
+def response_transfer_3_to_2_to_1(
+    remote_file_pi3,  # 3. Pi'de oluşturulmuş yanıt dosyası
+    remote_file_pi2,  # 2. Pi'de geçici saklama yolu
+    remote_file_pi1   # 1. Pi'deki nihai dosya yolu
+):
+    """
+    1) Pi #3'teki dosyayı Lokal (Pi #1) makineye indir
+    2) Lokalden Pi #2'ye yükle
+    3) Pi #2'den tekrar Lokal (Pi #1)'e indir
+    4) Son olarak Lokal (Pi #1)'den yine Pi #1'e (aslında aynı makineyse gerek kalmayabilir) 
+       veya istersek başka bir path'e kopyalarız
+    """
+    pi2_info = devices["yasarpi2"]
+    pi3_info = devices["yasarpi3"]
+    pi1_info = devices["yasarpi1"]
+
+    # Adım 1: Pi #3 → Lokal
+    local_temp_from_3 = "/tmp/response_from_pi3"
+    if not scp_download(remote_file_pi3, local_temp_from_3, pi3_info):
+        print("[HATA] 3→1 indirme (lokale) başarısız.")
+        return False
+
+    # Adım 2: Lokal → Pi #2
+    if not scp_upload(local_temp_from_3, remote_file_pi2, pi2_info):
+        print("[HATA] 1→2 yüklemesi başarısız.")
+        return False
+
+    # Adım 3: Pi #2 → Lokal
+    local_temp_from_2 = "/tmp/response_from_pi2"
+    if not scp_download(remote_file_pi2, local_temp_from_2, pi2_info):
+        print("[HATA] 2→1 indirme (lokale) başarısız.")
+        return False
+
+    # Adım 4: Lokal → Pi #1 (veya isterseniz başka bir işlem)
+    if not scp_upload(local_temp_from_2, remote_file_pi1, pi1_info):
+        print("[HATA] 1→1 yüklemesi başarısız.")
+        return False
+
+    print("[OK] Yanıt dosyası 3→2→1 akışını tamamladı.")
+    return True
+
+########################################
+# ANA ÇALIŞMA (Örnek Akış)
+########################################
+def main():
+    # Pi #1'de bulunduğunu varsaydığımız kaynak dosya
+    local_file = "/path/to/local/file"         
+
+    # Pi #2'de geçici saklama yolu
+    remote_path_pi2 = "/home/yasarpi2/intermediate_file"
+
+    # Pi #3'te asıl gidecek hedef dosya
+    remote_path_pi3 = "/home/yasarpi3/final_file"
+
+    # 1) Dosyayı 1 → 2 → 3 şeklinde aktar
+    if not file_transfer_1_to_2_to_3(local_file, remote_path_pi2, remote_path_pi3):
+        print("[HATA] 1→2→3 aktarımı başarısız.")
+        return
+
+    # 2) Pi #3 üzerinde bir 'response.txt' oluşturalım
+    pi3_info = devices["yasarpi3"]
+    response_remote_path_pi3 = "/home/yasarpi3/response.txt"
+    response_text = "Dosya başarıyla alındı: /home/yasarpi3/final_file"
+    if not create_remote_file(pi3_info, response_remote_path_pi3, response_text):
+        print("[HATA] 3. Pi üzerinde yanıt dosyası oluşturulamadı.")
+        return
+
+    # 3) Yanıt dosyasını 3 → 2 → 1 şeklinde aktar
+    response_path_pi2 = "/home/yasarpi2/response.txt"
+    response_path_pi1 = "/home/yasarpi1/response.txt"  # 1. Pi üzerindeki hedef
+    if not response_transfer_3_to_2_to_1(
+            response_remote_path_pi3,
+            response_path_pi2,
+            response_path_pi1
+        ):
+        print("[HATA] 3→2→1 aktarımı başarısız.")
+        return
+
+    print("[OK] Tüm işlem başarıyla tamamlandı.")
+
+if __name__ == "__main__":
+    main()
